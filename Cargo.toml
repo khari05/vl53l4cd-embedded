@@ -7,6 +7,7 @@ license = "MIT"
 repository = "https://github.com/akeamc/vl53l4cd"
 
 [dependencies]
+embedded-hal-async = "0.2.0-alpha.2"
 i2cdev = { version = "0.5.1", optional = true }
 tokio = { version = "1.20.0", features = ["time"], optional = true }
 tracing = { version = "0.1.35", optional = true, default-features = false, features = ["attributes"] }
