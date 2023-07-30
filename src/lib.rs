@@ -1,19 +1,18 @@
 //! Async driver for the [VL53L4CD ToF distance sensor](https://www.st.com/en/imaging-and-photonics-solutions/vl53l4cd.html).
 
-
 #![warn(missing_docs)]
 #![no_std]
 
 mod device;
 
-use core::fmt::Debug;
-
 use device::*;
 
+use embedded_hal_async::delay::DelayUs;
 #[cfg(feature = "tracing")]
 use tracing::{debug, error, instrument};
 
 /// A VL53L4CD measurement.
+#[derive(Debug)]
 pub struct Measurement {
     /// Validity of the measurement.
     pub status: device::Status,
@@ -84,8 +83,7 @@ where
     /// If the device id reported by the sensor isn't `0xebaa`, this
     /// function returns an error. This is mostly done to prevent
     /// strange I²C bugs where all returned bytes are zeroed.
-    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
-    pub async fn init(&mut self) -> Result<(), Vl53l4cdError<E>> {
+    pub async fn init<D: DelayUs>(&mut self, delay: &mut D) -> Result<(), Vl53l4cdError<E>> {
         let id = self.read_word(Register::IDENTIFICATION_MODEL_ID).await?;
         if id != 0xebaa {
             #[cfg(feature = "tracing")]
@@ -97,8 +95,7 @@ where
         debug!("waiting for boot");
 
         while self.read_byte(Register::SYSTEM_STATUS).await? != 0x3 {
-            #[cfg(feature = "tokio")] // TODO: allow the user to implement sleep
-            tokio::time::sleep(core::time::Duration::from_millis(1)).await; // wait for boot
+            delay.delay_ms(1).await; // wait for boot
         }
 
         #[cfg(feature = "tracing")]
@@ -107,13 +104,10 @@ where
         self.i2c.write(self.slave_addr, DEFAULT_CONFIG_MSG).await?;
 
         // start VHV
-        self.start_ranging().await?;
+        self.start_ranging(delay).await?;
         self.stop_ranging().await?;
-        self.write_byte(
-            Register::VHV_CONFIG_TIMEOUT_MACROP_LOOP_BOUND,
-            0x09,
-        )
-        .await?;
+        self.write_byte(Register::VHV_CONFIG_TIMEOUT_MACROP_LOOP_BOUND, 0x09)
+            .await?;
         self.write_byte(Register::MYSTERY_1, 0).await?;
         self.write_word(Register::MYSTERY_2, 0x500).await?;
 
@@ -178,15 +172,11 @@ where
             );
 
             // autonomous low power mode
-            let clock_pll = u32::from(
-                self.read_word(Register::RESULT_OSC_CALIBRATE_VAL).await? & 0x3ff,
-            );
+            let clock_pll =
+                u32::from(self.read_word(Register::RESULT_OSC_CALIBRATE_VAL).await? & 0x3ff);
             let inter_measurement_fac = 1.055 * (inter_measurement_ms * clock_pll) as f32;
-            self.write_dword(
-                Register::INTERMEASUREMENT_MS,
-                inter_measurement_fac as u32,
-            )
-            .await?;
+            self.write_dword(Register::INTERMEASUREMENT_MS, inter_measurement_fac as u32)
+                .await?;
 
             timing_budget_us -= 4300;
             timing_budget_us /= 2;
@@ -204,9 +194,17 @@ where
     /// the measurement. This function polls the sensor for a measurement
     /// until one is available, reads the measurement and finally clears
     /// the interrupt in order to request another measurement.
-    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
-    pub async fn measure(&mut self) -> Result<Measurement, Vl53l4cdError<E>> {
-        self.wait_for_measurement().await?;
+    // #[cfg_attr(feature = "tracing", instrument(skip(self)))]
+    pub async fn measure<D: DelayUs>(
+        &mut self,
+        delay: &mut D,
+    ) -> Result<Measurement, Vl53l4cdError<E>> {
+        let m = self.wait_for_measurement(delay).await;
+
+        if m.is_err() {
+            self.clear_interrupt().await?;
+            return Err(m.unwrap_err());
+        }
 
         #[cfg(feature = "tracing")]
         debug!("measurement ready; reading");
@@ -224,14 +222,17 @@ where
     /// > Ambient temperature has an effect on ranging accuracy. In order to ensure the best performances, a temperature
     /// > update needs to be applied to the sensor. This update needs to be performed when the temperature might have
     /// > changed by more than 8 degrees Celsius.
-    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
-    pub async fn start_temperature_update(&mut self) -> Result<(), Vl53l4cdError<E>> {
+    // #[cfg_attr(feature = "tracing", instrument(skip(self)))]
+    pub async fn start_temperature_update<D: DelayUs>(
+        &mut self,
+        delay: &mut D,
+    ) -> Result<(), Vl53l4cdError<E>> {
         self.write_byte(Register::VHV_CONFIG_TIMEOUT_MACROP_LOOP_BOUND, 0x81)
             .await?;
         self.write_byte(Register::MYSTERY_1, 0x92).await?;
         self.write_byte(Register::SYSTEM_START, 0x40).await?;
 
-        self.wait_for_measurement().await?;
+        self.wait_for_measurement(delay).await?;
         self.clear_interrupt().await?;
         self.stop_ranging().await?;
 
@@ -243,8 +244,11 @@ where
     }
 
     /// Poll the sensor until a measurement is ready.
-    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
-    pub async fn wait_for_measurement(&mut self) -> Result<(), Vl53l4cdError<E>> {
+    // #[cfg_attr(feature = "tracing", instrument(skip(self)))]
+    pub async fn wait_for_measurement<D: DelayUs>(
+        &mut self,
+        delay: &mut D,
+    ) -> Result<(), Vl53l4cdError<E>> {
         #[cfg(feature = "tracing")]
         debug!("waiting for measurement");
 
@@ -267,7 +271,14 @@ where
 
         #[cfg(not(feature = "tokio"))]
         {
-            while !self.has_measurement().await? {}
+            let mut waited: u16 = 0;
+            while !self.has_measurement().await? {
+                if waited > 2 {
+                    return Err(Vl53l4cdError::Timeout);
+                }
+                delay.delay_ms(1).await;
+                waited += 1;
+            }
             Ok(())
         }
     }
@@ -328,9 +339,12 @@ where
     }
 
     /// Begin ranging.
-    #[inline]
-    #[cfg_attr(feature = "tracing", instrument(level = "debug", skip(self)))]
-    pub async fn start_ranging(&mut self) -> Result<(), Vl53l4cdError<E>> {
+    // #[inline]
+    // #[cfg_attr(feature = "tracing", instrument(level = "debug", skip(self)))]
+    pub async fn start_ranging<D: DelayUs>(
+        &mut self,
+        delay: &mut D,
+    ) -> Result<(), Vl53l4cdError<E>> {
         if self.read_word(Register::INTERMEASUREMENT_MS).await? == 0 {
             // autonomous mode
             self.write_byte(Register::SYSTEM_START, 0x21).await?;
@@ -339,7 +353,7 @@ where
             self.write_byte(Register::SYSTEM_START, 0x40).await?;
         }
 
-        self.wait_for_measurement().await?;
+        self.wait_for_measurement(delay).await?;
         self.clear_interrupt().await
     }
 
