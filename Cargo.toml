@@ -9,8 +9,7 @@ repository = "https://github.com/khari05/vl53l4cd-embedded"
 [dependencies]
 embedded-hal-async = "1.0.0-rc.1"
 i2cdev = { version = "0.5.1", optional = true }
-tokio = { version = "1.20.0", features = ["time"], optional = true }
-tracing = { version = "0.1.35", optional = true, default-features = false, features = ["attributes"] }
+defmt = { version = "0.3.5", optional = true}
 
 [dev-dependencies]
 anyhow = "1.0.65"
@@ -18,8 +17,9 @@ tokio = { version = "1.20.0", features = ["macros", "rt-multi-thread"] }
 tokio-test = "0.4.2"
 
 [features]
-std = ["tracing/std"]
-default = ["std"]
+tracing = ["dep:defmt"]
+defmt = ["dep:defmt"]
+default = []
 
 [package.metadata.docs.rs]
 all-features = true

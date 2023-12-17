@@ -9,10 +9,13 @@ use device::*;
 
 use embedded_hal_async::delay::DelayUs;
 #[cfg(feature = "tracing")]
-use tracing::{debug, error, instrument};
+use defmt::{debug, error, Format};
+#[cfg(feature = "defmt")]
+use defmt::Format;
 
 /// A VL53L4CD measurement.
 #[derive(Debug)]
+#[cfg_attr(any(feature = "defmt", feature = "tracing"), derive(Format))]
 pub struct Measurement {
     /// Validity of the measurement.
     pub status: device::Status,
@@ -116,6 +119,23 @@ where
         Ok(())
     }
 
+    /// This function sets a new I2C address to a sensor. It can be used when multiple sensors share the
+    /// same I2C bus.
+    /// 
+    /// **It appears that the ToF sensors do not remember their reassigned I2C address. They must be individually
+    /// reassigned on boot every time the power is cycled. This can be done by pulling the XSHUT pin low on all but
+    /// one sensor.**
+    /// 
+    /// Returns Ok() if successful
+    pub async fn set_i2c_addr(&mut self, new_addr: u8) -> Result<(), Vl53l4cdError<E>> {
+        let res = self.write_byte(Register::I2C_SLAVE_DEVICE_ADDRESS, new_addr).await;
+        if res.is_ok() {
+            self.slave_addr = new_addr;
+            return Ok(());
+        }
+        return res
+    }
+
     /// Set the range timing for this sensor. The timing budget *must*
     /// be greater than or equal to 10 ms and less than or equal to 200 ms.
     /// From the manufacturer's user manual:
@@ -140,7 +160,6 @@ where
     /// at [`OSC_FREQ`]) is zero, this function panics.
     ///
     /// [`OSC_FREQ`]: Register#variant.OSC_FREQ
-    #[cfg_attr(feature = "tracing", instrument(level = "debug", skip(self)))]
     pub async fn set_range_timing(
         &mut self,
         timing_budget_ms: u32,
@@ -268,12 +287,14 @@ where
                 Err(Vl53l4cdError::Timeout)
             }
         }
-
+        
         #[cfg(not(feature = "tokio"))]
         {
             let mut waited: u16 = 0;
             while !self.has_measurement().await? {
-                if waited > 2 {
+                if waited > 5 {
+                    #[cfg(feature = "tracing")]
+                    error!("timeout waiting for measurement");
                     return Err(Vl53l4cdError::Timeout);
                 }
                 delay.delay_ms(1).await;
@@ -315,7 +336,6 @@ where
     /// # });
     /// ```
     #[inline]
-    #[cfg_attr(feature = "tracing", instrument(level = "debug", skip(self)))]
     pub async fn read_measurement(&mut self) -> Result<Measurement, Vl53l4cdError<E>> {
         let status = self.read_byte(Register::RESULT_RANGE_STATUS).await? & 0x1f;
 
@@ -331,7 +351,6 @@ where
 
     /// Clear the interrupt which will eventually trigger a new measurement.
     #[inline]
-    #[cfg_attr(feature = "tracing", instrument(level = "debug", skip(self)))]
     pub async fn clear_interrupt(&mut self) -> Result<(), Vl53l4cdError<E>> {
         self.write_byte(Register::SYSTEM_INTERRUPT_CLEAR, 0x01)
             .await?;
@@ -359,7 +378,6 @@ where
 
     /// Stop ranging.
     #[inline]
-    #[cfg_attr(feature = "tracing", instrument(level = "debug", skip(self)))]
     pub async fn stop_ranging(&mut self) -> Result<(), Vl53l4cdError<E>> {
         self.write_byte(Register::SYSTEM_START, 0x00).await?;
         Ok(())
@@ -460,6 +478,7 @@ pub fn range_config_values(mut timing_budget_us: u32, osc_freq: u16) -> (u16, u1
 /// VL53L4CD driver error. In order to get more details,
 /// make sure that the `tracing` feature is enabled.
 #[derive(Debug)]
+#[cfg_attr(any(feature = "defmt", feature = "tracing"), derive(Format))]
 pub enum Vl53l4cdError<E> {
     /// I²C (I/O) error.
     I2c(E),

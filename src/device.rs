@@ -1,3 +1,6 @@
+#[cfg(any(feature = "tracing", feature = "defmt"))]
+use defmt::Format;
+
 pub(crate) const DEFAULT_CONFIG_MSG: &[u8] = &[
     0x00, // first byte of register to write to
     0x2d, // second byte of register to write to
@@ -97,9 +100,11 @@ pub(crate) const DEFAULT_CONFIG_MSG: &[u8] = &[
 
 /// A register on the device, identified by a 16-bit address.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(any(feature = "defmt", feature = "tracing"), derive(Format))]
 #[allow(non_camel_case_types)]
 #[allow(missing_docs)]
 pub enum Register {
+    I2C_SLAVE_DEVICE_ADDRESS = 0x0001,
     OSC_FREQ = 0x0006,
     VHV_CONFIG_TIMEOUT_MACROP_LOOP_BOUND = 0x0008,
     /// This name is temporary.
@@ -147,6 +152,7 @@ pub const DEFAULT_SLAVE_ADDR: u16 = 0x29;
 /// Measurement status as per the user manual.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[repr(u8)]
+#[cfg_attr(any(feature = "defmt", feature = "tracing"), derive(Format))]
 pub enum Status {
     /// Returned distance is valid.
     Valid = 0,
